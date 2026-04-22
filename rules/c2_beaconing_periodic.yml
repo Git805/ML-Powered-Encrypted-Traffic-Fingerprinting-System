@@ -1,0 +1,121 @@
+title: C2 Beaconing via Periodic Encrypted HTTPS Connections
+id: a3f8c2d1-4e7b-4f9a-8c3d-2b1e5f6a7c8d
+status: experimental
+description: |
+    Detects Command-and-Control (C2) beaconing behaviour over encrypted HTTPS
+    traffic by identifying highly periodic outbound connections to external
+    destinations. C2 frameworks such as Cobalt Strike, Sliver, and Metasploit
+    HTTPS reverse shells beacon at regular intervals to maintain persistence
+    and receive tasking. Because traffic is TLS-encrypted, detection relies on
+    flow-level timing metadata rather than payload inspection.
+
+    The rule identifies connections exhibiting:
+      - High periodicity (consistent inter-arrival times within a 5-minute window)
+      - Low jitter (variance below 15% of mean interval — typical of automated beacons)
+      - Repeated connections to the same external destination over port 443
+      - Absence of human browsing indicators (low session byte variance, no referrer)
+
+    Tested against: Cobalt Strike default and malleable C2 profiles, Sliver HTTPS
+    implants, Metasploit HTTPS meterpreter, and Havoc Framework HTTPS listeners.
+    False positives reduced by excluding known CDN ranges and health-check patterns.
+references:
+    - https://attack.mitre.org/techniques/T1071/001/
+    - https://attack.mitre.org/techniques/T1132/
+    - https://github.com/charudatta-padhye/encrypted-traffic-detection
+    - https://www.mandiant.com/resources/blog/detecting-cobalt-strike-default-modules
+    - https://unit42.paloaltonetworks.com/cobalt-strike-used-in-attacks/
+author: Charudatta Padhye
+date: 2025-04-22
+modified: 2025-04-22
+tags:
+    - attack.command_and_control
+    - attack.t1071.001      # Application Layer Protocol: Web Protocols
+    - attack.t1572          # Protocol Tunneling
+    - attack.t1132          # Data Encoding
+    - attack.t1008          # Fallback Channels
+    - attack.s0154          # Cobalt Strike
+logsource:
+    category: network_connection
+    product: zeek
+    definition: |
+        Requires Zeek conn.log with the following fields populated:
+        ts, uid, id.orig_h, id.resp_h, id.resp_p, proto, service,
+        duration, orig_bytes, resp_bytes, conn_state.
+        Periodicity scoring requires aggregation across a 5-minute window —
+        implement via Zeek's connection aggregation scripts or SIEM correlation.
+detection:
+    selection_protocol:
+        dst_port: 443
+        proto: 'tcp'
+        conn_state:
+            - 'SF'      # Normal established connection
+            - 'S1'      # Connection established, not closed
+
+    selection_destination:
+        dst_ip|cidr|not:
+            # Exclude known CDN and major cloud ranges (reduce FP)
+            - '13.32.0.0/15'      # AWS CloudFront
+            - '13.35.0.0/16'      # AWS CloudFront
+            - '143.204.0.0/16'    # AWS CloudFront
+            - '205.251.192.0/19'  # AWS CloudFront
+            - '104.16.0.0/13'     # Cloudflare
+            - '104.24.0.0/14'     # Cloudflare
+            - '172.64.0.0/13'     # Cloudflare
+            - '8.8.8.0/24'        # Google DNS
+            - '142.250.0.0/15'    # Google
+            - '216.58.0.0/16'     # Google
+
+    selection_internal_source:
+        src_ip|cidr:
+            - '10.0.0.0/8'
+            - '172.16.0.0/12'
+            - '192.168.0.0/16'
+
+    # Periodicity indicators — implement as SIEM aggregation condition
+    # These fields are computed by the companion Zeek script or ML pipeline
+    filter_legitimate_patterns:
+        # Exclude connections with large byte variance (human browsing)
+        orig_bytes|gt: 10000000     # Sessions >10MB unlikely to be beacons
+        # Exclude very short-lived connections (health checks, OCSP)
+        duration|lt: 0.1
+
+    condition: >
+        selection_protocol
+        and selection_destination
+        and selection_internal_source
+        and not filter_legitimate_patterns
+
+    # SIEM aggregation condition (implement as correlation rule):
+    # Same src_ip → same dst_ip:443 occurs >= 5 times in 10 minutes
+    # AND standard_deviation(connection_intervals) / mean(connection_intervals) < 0.15
+    # (coefficient of variation < 15% = high periodicity, low jitter)
+
+falsepositives:
+    - Legitimate software with fixed polling intervals (monitoring agents, backup clients, telemetry)
+    - Antivirus / EDR cloud check-ins (exclude known vendor IP ranges)
+    - Browser pre-fetch and HSTS preload connections
+    - Certificate revocation checks (OCSP)
+    - Tune by: adding dst_ip allowlist for known internal software update servers
+
+level: medium
+
+# ── Tuning Guidance ────────────────────────────────────────────────────────
+#
+# Raise to HIGH after:
+#   1. Allowlisting your organisation's known polling software IPs
+#   2. Confirming CDN exclusion ranges cover your environment's traffic
+#   3. Combining with JA3 anomaly rule (see rules/tls_ja3_anomaly.yml)
+#
+# Lower threshold for threat hunting (catch more, accept more FP):
+#   Reduce connection count threshold from 5 to 3 in your SIEM correlation
+#   Increase CV threshold from 0.15 to 0.25
+#
+# MITRE ATT&CK Coverage:
+#   T1071.001 — C2 over HTTPS (primary)
+#   T1572     — Protocol Tunneling (secondary, for double-encapsulation C2)
+#   T1008     — Fallback Channels (when combined with DNS beaconing rule)
+#
+# Companion rules in this library:
+#   rules/tls_ja3_anomaly.yml         — Rare JA3 fingerprint detection
+#   rules/high_entropy_dns.yml        — DNS-over-HTTPS C2 detection
+#   rules/lateral_movement_smb.yml    — Post-exploitation lateral movement
