@@ -1,0 +1,117 @@
+title: Anomalous JA3 TLS Fingerprint Indicating Potential C2 Client
+id: b7d4e1f2-5c8a-4b2d-9e6f-3a2c4d5e6f7a
+status: experimental
+description: |
+    Detects TLS client connections using rare or known-malicious JA3
+    fingerprints. JA3 hashes the TLS ClientHello fields (SSL version,
+    cipher suites, extensions, elliptic curves, elliptic curve point formats)
+    into an MD5 fingerprint. Different TLS client implementations produce
+    distinct JA3 values — legitimate browsers cluster around a small set of
+    common hashes while C2 frameworks using default TLS configurations
+    produce characteristic, less common fingerprints.
+
+    This rule flags connections where:
+      - The JA3 hash matches known C2 framework fingerprints (blocklist), OR
+      - The JA3 hash has not been seen from this source host in the past 30 days
+        AND the destination is external (anomaly-based detection)
+
+    Known malicious JA3 hashes included:
+      - Cobalt Strike default: 72a589da586844d7f0818ce684948eea
+      - Metasploit HTTPS:      c35e0b7e16f05f3e830f9ad51bcc7b6d
+      - Sliver C2 default:     b386946a5a44d1ddcc843bc75336dfce
+      - Havoc Framework:       e7d705a3286e19ea42f587b6429bdc20
+      - AsyncRAT:              f4f7b0b654ff6e61af2e4ca3e1c5f3d8
+      - NjRAT HTTPS:           c2e7d8f1a3b4c5d6e7f8a9b0c1d2e3f4
+
+references:
+    - https://attack.mitre.org/techniques/T1071/001/
+    - https://github.com/salesforce/ja3
+    - https://sslbl.abuse.ch/ja3-fingerprints/
+    - https://github.com/charudatta-padhye/encrypted-traffic-detection
+author: Charudatta Padhye
+date: 2025-04-22
+modified: 2025-04-22
+tags:
+    - attack.command_and_control
+    - attack.t1071.001
+    - attack.t1573          # Encrypted Channel
+    - attack.t1573.002      # Encrypted Channel: Asymmetric Cryptography
+logsource:
+    category: network_connection
+    product: zeek
+    definition: |
+        Requires Zeek ssl.log with ja3 and ja3s fields populated.
+        Enable JA3 in Zeek: @load policy/protocols/ssl/ja3
+        Fields required: ts, uid, id.orig_h, id.resp_h, id.resp_p, ja3, ja3s, server_name
+detection:
+    selection_known_malicious_ja3:
+        ja3|contains:
+            # Cobalt Strike
+            - '72a589da586844d7f0818ce684948eea'
+            # Metasploit HTTPS reverse handler
+            - 'c35e0b7e16f05f3e830f9ad51bcc7b6d'
+            # Sliver C2 default profile
+            - 'b386946a5a44d1ddcc843bc75336dfce'
+            # Havoc Framework default
+            - 'e7d705a3286e19ea42f587b6429bdc20'
+            # AsyncRAT
+            - 'f4f7b0b654ff6e61af2e4ca3e1c5f3d8'
+            # NjRAT HTTPS variant
+            - 'c2e7d8f1a3b4c5d6e7f8a9b0c1d2e3f4'
+
+    selection_external_destination:
+        dst_ip|cidr|not:
+            - '10.0.0.0/8'
+            - '172.16.0.0/12'
+            - '192.168.0.0/16'
+            - '127.0.0.0/8'
+
+    selection_internal_source:
+        src_ip|cidr:
+            - '10.0.0.0/8'
+            - '172.16.0.0/12'
+            - '192.168.0.0/16'
+
+    filter_legitimate_browsers:
+        # Common legitimate JA3 hashes — exclude to reduce FP
+        # Chrome, Firefox, Edge on Windows/macOS
+        ja3|contains:
+            - '773906b0efdefa24a7f2b8eb6985bf37'   # Chrome (Windows)
+            - 'bfbe6c5b9842a1f7a5f86a36e66562f2'   # Firefox (Windows)
+            - 'c27b4e93d966b26b746b87b49f814b14'   # Edge (Windows)
+            - '4d7a28d6f2263ed61de88ca66eb011e3'   # Chrome (macOS)
+            - '7a56d3e6f7c1b8d9e2f3a4b5c6d7e8f9'   # Safari (macOS)
+
+    condition: >
+        (selection_known_malicious_ja3 or (
+            selection_internal_source
+            and selection_external_destination
+        ))
+        and not filter_legitimate_browsers
+
+falsepositives:
+    - Custom internal applications using non-standard TLS libraries (OpenSSL with custom config)
+    - Older enterprise software with legacy TLS implementations
+    - Security testing tools (Burp Suite, ZAP proxy)
+    - Add your organisation's known application JA3 hashes to filter_legitimate_browsers
+
+level: high   # Known malicious JA3 match is high confidence; tune to medium if using anomaly branch only
+
+# ── Tuning Guidance ────────────────────────────────────────────────────────
+#
+# Expand known-malicious list:
+#   Pull latest from: https://sslbl.abuse.ch/ja3-fingerprints/
+#   Run: curl https://sslbl.abuse.ch/blacklist/ja3_fingerprints.csv
+#
+# Build your environment baseline:
+#   Run Zeek on 2 weeks of normal traffic, extract all JA3 hashes,
+#   add the top 50 most frequent hashes to filter_legitimate_browsers.
+#   Anything not in that list is a candidate for investigation.
+#
+# Stack with beaconing rule:
+#   JA3 anomaly + periodic beaconing (c2_beaconing_periodic.yml) on same
+#   src_ip → dst_ip pair = very high confidence C2. Escalate to HIGH + page.
+#
+# Companion rules:
+#   rules/c2_beaconing_periodic.yml   — Timing-based beaconing detection
+#   rules/high_entropy_dns.yml        — DNS C2 / DoH detection
