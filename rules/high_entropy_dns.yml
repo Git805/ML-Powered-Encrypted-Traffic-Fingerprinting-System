@@ -1,0 +1,118 @@
+title: High Entropy DNS Query Indicating DNS Tunnelling or DoH-Based C2
+id: c9e2f4a3-6d1b-4c8e-a7f2-4b3d5e6f8a9b
+status: experimental
+description: |
+    Detects potential DNS tunnelling or DNS-over-HTTPS (DoH) C2 communication
+    by identifying DNS queries with anomalously high subdomain entropy and
+    unusual query length patterns. C2 frameworks that use DNS as a covert
+    channel encode data in subdomains — the randomness of encoded data
+    produces measurably higher Shannon entropy than legitimate hostnames.
+
+    Detection logic:
+      - DNS query length exceeding normal thresholds (>52 chars in subdomain)
+      - High subdomain label entropy (Shannon entropy >3.5 bits per character)
+      - Repeated queries to the same registered domain with varying subdomains
+        (indicates data exfiltration or C2 polling via DNS)
+      - DNS queries over non-standard ports (tunnelling evasion)
+
+    Known C2 frameworks using DNS: Cobalt Strike DNS beacon, DNScat2,
+    Iodine, POWERDNS, PoshC2 DNS, Sliver DNS listener.
+references:
+    - https://attack.mitre.org/techniques/T1071/004/
+    - https://attack.mitre.org/techniques/T1132/001/
+    - https://github.com/charudatta-padhye/encrypted-traffic-detection
+    - https://www.sans.org/white-papers/33901/
+author: Charudatta Padhye
+date: 2025-04-22
+modified: 2025-04-22
+tags:
+    - attack.command_and_control
+    - attack.t1071.004      # Application Layer Protocol: DNS
+    - attack.t1132.001      # Data Encoding: Standard Encoding
+    - attack.t1048.001      # Exfiltration Over Alternative Protocol: DNS
+    - attack.t1572          # Protocol Tunneling
+logsource:
+    category: dns
+    product: zeek
+    definition: |
+        Requires Zeek dns.log.
+        Fields required: ts, uid, id.orig_h, id.resp_h, id.resp_p,
+        query, qtype_name, answers, TTL.
+        Entropy computation requires post-processing via companion Python script
+        or SIEM calculated field. See: scripts/dns_entropy_calc.py
+detection:
+    selection_long_query:
+        query|re: '.{52,}\.(com|net|org|io|co|info|biz|xyz|top|club)'
+        # Matches queries where the total length exceeds 52 characters
+        # before the TLD — legitimate hostnames rarely exceed this
+
+    selection_non_standard_port:
+        dst_port|not:
+            - 53    # Standard DNS
+            - 853   # DNS-over-TLS
+        # DNS on any other port is highly suspicious
+
+    selection_high_frequency_subdomain:
+        # Flag when same registered domain seen >20 times in 5 minutes
+        # with different subdomains — implement as SIEM aggregation
+        qtype_name:
+            - 'A'
+            - 'AAAA'
+            - 'TXT'     # TXT records commonly used for C2 data return
+            - 'NULL'    # NULL records used by dnscat2
+
+    filter_legitimate_cdn:
+        query|contains:
+            # Known CDN and legitimate long-hostname patterns
+            - 'cloudfront.net'
+            - 'akamaiedge.net'
+            - 'fastly.net'
+            - 'googleusercontent.com'
+            - 'windows.net'
+            - 'azure.com'
+            - 'amazonaws.com'
+
+    filter_internal_dns:
+        dst_ip|cidr:
+            - '10.0.0.0/8'
+            - '172.16.0.0/12'
+            - '192.168.0.0/16'
+        # Internal DNS servers are not C2 destinations — exclude
+
+    condition: >
+        (selection_long_query or selection_non_standard_port or selection_high_frequency_subdomain)
+        and not filter_legitimate_cdn
+        and not filter_internal_dns
+
+falsepositives:
+    - Legitimate CDN hostnames with long subdomains (mitigated by filter_legitimate_cdn)
+    - DKIM/SPF TXT record lookups (long but legitimate)
+    - Some telemetry and analytics services with encoded query strings
+    - Add your organisation's known long-hostname domains to filter_legitimate_cdn
+
+level: medium
+
+# ── Entropy Computation ────────────────────────────────────────────────────
+#
+# Sigma cannot compute Shannon entropy natively — implement this as:
+#
+# Splunk:
+#   | eval subdomain=replace(query, "\.[^.]+\.[^.]+$", "")
+#   | eval entropy=sum(p*log(p)/log(2)) where p=frequency of each char
+#   | where entropy > 3.5
+#
+# QRadar AQL:
+#   SELECT sourceip, domainname,
+#     ENTROPY(SUBDOMAIN(domainname)) as entropy
+#   FROM events WHERE entropy > 3.5
+#
+# Python (for offline analysis / hunting):
+#   import math
+#   def entropy(s):
+#       p = [s.count(c)/len(s) for c in set(s)]
+#       return -sum(x*math.log2(x) for x in p)
+#   # Flag: entropy(subdomain) > 3.5
+#
+# Companion rules:
+#   rules/c2_beaconing_periodic.yml   — HTTPS timing-based detection
+#   rules/tls_ja3_anomaly.yml         — JA3 fingerprint detection
