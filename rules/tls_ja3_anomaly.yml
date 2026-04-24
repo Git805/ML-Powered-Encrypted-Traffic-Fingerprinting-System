@@ -58,6 +58,11 @@ detection:
             - 'f4f7b0b654ff6e61af2e4ca3e1c5f3d8'
             # NjRAT HTTPS variant
             - 'c2e7d8f1a3b4c5d6e7f8a9b0c1d2e3f4'
+            # AsyncRAT
+            - '6fbffefa049d233459083c245f5a9796'
+            - '39ea610ef89ee2dad2c941ee4b183e70'
+            - '15bbf7ece43006b28a11e8ffc1a3c247'
+            - 'd42e90940db76b42f807e560d1ad8f55'
 
     selection_external_destination:
         dst_ip|cidr|not:
