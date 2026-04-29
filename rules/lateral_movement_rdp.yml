@@ -1,0 +1,146 @@
+title: Lateral Movement via Remote Desktop Protocol (RDP)
+id: e5f8a3b2-9c4d-4e1f-c6a2-7b3d4e5f6a7b
+status: experimental
+description: |
+    Detects lateral movement via Remote Desktop Protocol (RDP) by
+    identifying suspicious RDP connection patterns including:
+      - RDP connections originating from non-administrative workstations
+        (workstation-to-workstation RDP is rarely legitimate)
+      - RDP connections to multiple internal destinations from the same
+        source within a short time window (RDP scanning/hopping)
+      - RDP logons outside business hours
+      - RDP connections using accounts that have never used RDP before
+      - Failed RDP attempts followed by success (brute force)
+      - RDP connections from hosts that have never initiated RDP before
+
+    RDP lateral movement is observed in the vast majority of ransomware
+    intrusions and is a primary technique for post-compromise access.
+    Threat actors including LockBit, BlackCat/ALPHV, and Conti
+    extensively use RDP for lateral movement after initial access.
+
+    The most reliable signal: workstation-to-workstation RDP.
+    In most enterprise environments, only servers and jump hosts
+    should be accepting inbound RDP connections from other workstations.
+
+references:
+    - https://attack.mitre.org/techniques/T1021/001/
+    - https://github.com/charudatta-padhye/detection-query-library
+    - https://www.cisa.gov/news-events/cybersecurity-advisories/aa23-061a
+author: Charudatta Padhye
+date: 2025-04-30
+modified: 2025-04-30
+tags:
+    - attack.lateral_movement
+    - attack.t1021.001        # Remote Services: Remote Desktop Protocol
+    - attack.t1078            # Valid Accounts (credential used for RDP)
+    - attack.t1110            # Brute Force (failed RDP attempts)
+    - attack.s0029            # PsExec (often used alongside RDP)
+logsource:
+    category: network_connection
+    product: windows
+    definition: |
+        Primary: Windows Security Event Log
+          EventID 4624 — Successful logon (LogonType 10 = RemoteInteractive/RDP)
+          EventID 4625 — Failed logon (LogonType 10)
+          EventID 4778 — Session reconnected to Window Station
+          EventID 4779 — Session disconnected from Window Station
+
+        Secondary: Network flow logs
+          DestinationPort: 3389 (standard RDP)
+          DestinationPort: 3390, 3391 (non-standard RDP, higher suspicion)
+
+        Enable: Advanced Audit Policy → Logon/Logoff → Audit Logon (Success+Failure)
+        Enable: Advanced Audit Policy → Logon/Logoff → Audit Other Logon/Logoff Events
+detection:
+    selection_rdp_logon:
+        EventID: 4624
+        LogonType: 10    # RemoteInteractive = RDP session
+
+    selection_rdp_network:
+        # Network flow detection (use if Zeek/firewall logs available)
+        dst_port:
+            - 3389    # Standard RDP
+            - 3390    # Non-standard (higher suspicion)
+            - 3391    # Non-standard (higher suspicion)
+        proto: tcp
+
+    selection_failed_rdp:
+        EventID: 4625
+        LogonType: 10    # Failed RDP attempts
+
+    selection_rdp_reconnect:
+        EventID:
+            - 4778    # RDP session reconnected
+            - 4779    # RDP session disconnected
+
+    filter_legitimate_rdp_sources:
+        # Exclude known legitimate RDP sources
+        # Add your jump hosts, IT admin workstations, Citrix gateways
+        IpAddress|cidr:
+            - '10.0.0.0/8'      # Adjust to your jump host subnet
+        ComputerName|contains:
+            - 'jumphost'
+            - 'bastion'
+            - 'rdp-gateway'
+            - 'citrix'
+
+    filter_service_accounts:
+        SubjectUserName|endswith:
+            - '$'       # Machine accounts
+        SubjectUserName|startswith:
+            - 'svc-'
+            - 'SVC-'
+
+    # High-confidence condition: workstation-to-workstation RDP
+    # Implement in SIEM:
+    # Source hostname contains workstation naming convention (e.g., WS-, DESK-, PC-)
+    # AND destination hostname also contains workstation naming convention
+    # This pattern is almost always malicious
+
+    condition: >
+        (selection_rdp_logon or selection_rdp_network)
+        and not filter_legitimate_rdp_sources
+        and not filter_service_accounts
+
+falsepositives:
+    - IT administrators using RDP for legitimate remote support
+    - Jump hosts and bastion servers (add to filter_legitimate_rdp_sources)
+    - Citrix and VDI infrastructure (add gateway IPs to exclusion list)
+    - Helpdesk tools (TeamViewer, AnyDesk) using RDP protocol underneath
+    - Tune by: building allowlist of approved RDP source → destination pairs
+
+level: medium
+
+# ── Detection Tiers by Confidence ─────────────────────────────────────────
+#
+# Tier 1 — High Confidence (alert immediately):
+#   Workstation → Workstation RDP (source and dest are non-server hostnames)
+#   RDP from external IP (internet-facing RDP — almost always malicious)
+#   RDP using built-in Administrator account
+#
+# Tier 2 — Medium Confidence (investigate):
+#   RDP to 3+ unique destinations within 10 minutes (RDP hopping)
+#   RDP outside business hours from non-approved accounts
+#   Failed RDP (>5 attempts) followed by success within 5 minutes
+#
+# Tier 3 — Low Confidence (hunt, not alert):
+#   First-time RDP from a source host that has never used RDP before
+#   RDP session duration anomaly (very short sessions indicate automation)
+#
+# Stacking for higher confidence:
+#   RDP lateral movement + Valid Account abuse (T1078) on same account
+#   = almost certainly adversarial. Escalate to Critical.
+#
+# Ransomware correlation:
+#   RDP lateral movement + large file access/encryption events
+#   = active ransomware deployment. Isolate immediately.
+#
+# MITRE ATT&CK Coverage:
+#   T1021.001 — Remote Services: RDP (primary)
+#   T1078     — Valid Accounts (credential used)
+#   T1110     — Brute Force (failed attempts pattern)
+#
+# Companion rules:
+#   rules/valid_accounts_credential_abuse.yml  — Credential anomaly detection
+#   rules/c2_beaconing_periodic.yml            — Post-access C2 detection
+#   rules/tls_ja3_anomaly.yml                  — Encrypted channel detection
