@@ -1,0 +1,198 @@
+title: Masquerading via Executable Name and Path Spoofing
+id: a1b2c3d4-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+status: experimental
+description: |
+    Detects masquerading techniques where adversaries disguise malicious
+    executables as legitimate system processes or place them in paths
+    that mimic standard Windows directories. Masquerading allows
+    malware to evade detection by appearing to be a legitimate process
+    in task managers, SIEMs, and security tools.
+
+    Techniques covered:
+      - Executable named as legitimate Windows binary (svchost, explorer,
+        lsass, csrss) running from non-standard paths
+      - Executables placed in user-writable directories mimicking system paths
+        (e.g., C:\Windows\System32 vs C:\Windows\System32\ with trailing space)
+      - Process parent-child relationship anomalies (svchost not spawned by
+        services.exe, lsass not spawned by wininit.exe)
+      - Executables with legitimate names but wrong parent processes
+      - Right-to-left override (RTLO) character abuse in filenames
+
+    Commonly observed in: APT groups using renamed system binaries,
+    commodity malware naming executables "svch0st.exe" or "explorer .exe",
+    and ransomware droppers masquerading as Windows Update components.
+
+references:
+    - https://attack.mitre.org/techniques/T1036/
+    - https://attack.mitre.org/techniques/T1036/001/
+    - https://attack.mitre.org/techniques/T1036/003/
+    - https://attack.mitre.org/techniques/T1036/004/
+    - https://attack.mitre.org/techniques/T1036/005/
+    - https://github.com/charudatta-padhye/detection-query-library
+author: Charudatta Padhye
+date: 2025-05-05
+modified: 2025-05-05
+tags:
+    - attack.defense_evasion
+    - attack.t1036            # Masquerading
+    - attack.t1036.001        # Invalid Code Signature
+    - attack.t1036.003        # Rename System Utilities
+    - attack.t1036.004        # Masquerade Task or Service
+    - attack.t1036.005        # Match Legitimate Name or Location
+logsource:
+    category: process_creation
+    product: windows
+    definition: |
+        Requires Sysmon EventID 1 (Process Creation) with the following fields:
+        Image, ParentImage, CommandLine, CurrentDirectory, IntegrityLevel
+        Alternatively: Windows Security EventID 4688 with command line auditing.
+
+        Sysmon configuration: Enable ProcessCreate with full command line logging.
+        Enable hashing (MD5/SHA256) for signature validation.
+detection:
+    # Detection 1: Legitimate binary names running from wrong paths
+    selection_wrong_path_svchost:
+        EventID: 1
+        Image|endswith: '\svchost.exe'
+        Image|not|startswith:
+            - 'C:\Windows\System32\svchost.exe'
+            - 'C:\Windows\SysWOW64\svchost.exe'
+
+    selection_wrong_path_explorer:
+        EventID: 1
+        Image|endswith: '\explorer.exe'
+        Image|not|startswith:
+            - 'C:\Windows\explorer.exe'
+            - 'C:\Windows\SysWOW64\explorer.exe'
+
+    selection_wrong_path_lsass:
+        EventID: 1
+        Image|endswith: '\lsass.exe'
+        Image|not|startswith:
+            - 'C:\Windows\System32\lsass.exe'
+
+    selection_wrong_path_csrss:
+        EventID: 1
+        Image|endswith: '\csrss.exe'
+        Image|not|startswith:
+            - 'C:\Windows\System32\csrss.exe'
+
+    # Detection 2: Suspicious parent-child relationship anomalies
+    # svchost.exe should ALWAYS be spawned by services.exe
+    selection_svchost_wrong_parent:
+        EventID: 1
+        Image|endswith: '\svchost.exe'
+        ParentImage|not|endswith:
+            - '\services.exe'
+            - '\MsMpEng.exe'    # Defender spawns svchost in some scenarios
+
+    # lsass.exe should ALWAYS be spawned by wininit.exe
+    selection_lsass_wrong_parent:
+        EventID: 1
+        Image|endswith: '\lsass.exe'
+        ParentImage|not|endswith: '\wininit.exe'
+
+    # Detection 3: Executables in user-writable suspicious locations
+    # with names resembling system binaries
+    selection_suspicious_location:
+        EventID: 1
+        Image|contains:
+            - '\AppData\Local\Temp\'
+            - '\AppData\Roaming\'
+            - '\Users\Public\'
+            - '\ProgramData\'
+            - '\Windows\Temp\'
+        Image|endswith:
+            - '\svchost.exe'
+            - '\explorer.exe'
+            - '\lsass.exe'
+            - '\csrss.exe'
+            - '\winlogon.exe'
+            - '\taskhost.exe'
+            - '\rundll32.exe'
+            - '\regsvr32.exe'
+
+    # Detection 4: Common typosquatting patterns
+    # Adversaries use look-alike names to evade casual inspection
+    selection_typosquatting:
+        EventID: 1
+        Image|endswith:
+            - '\svch0st.exe'      # Zero instead of O
+            - '\scvhost.exe'      # Transposed letters
+            - '\svhost.exe'       # Missing C
+            - '\svchost32.exe'    # Added number
+            - '\explorer32.exe'
+            - '\lssas.exe'        # Transposed letters
+            - '\isass.exe'        # I instead of L (looks identical in some fonts)
+            - '\iexplore.exe'     # IE masquerading (if not in Program Files)
+            - '\taskhost.exe'
+            - '\taskhosts.exe'    # Added S
+
+    # Detection 5: RTLO character abuse in filename
+    # Unicode right-to-left override makes "cod.exe" appear as "exe.doc"
+    selection_rtlo_abuse:
+        EventID: 1
+        Image|contains: '\u202e'  # RTLO Unicode character
+
+    filter_legitimate_system:
+        # Legitimate Windows processes — exclude to prevent FP on detections 1-2
+        Image|startswith:
+            - 'C:\Windows\System32\'
+            - 'C:\Windows\SysWOW64\'
+            - 'C:\Windows\WinSxS\'
+        ParentImage|startswith:
+            - 'C:\Windows\System32\'
+            - 'C:\Windows\SysWOW64\'
+
+    condition: >
+        (selection_wrong_path_svchost or
+         selection_wrong_path_explorer or
+         selection_wrong_path_lsass or
+         selection_wrong_path_csrss or
+         selection_svchost_wrong_parent or
+         selection_lsass_wrong_parent or
+         selection_suspicious_location or
+         selection_typosquatting or
+         selection_rtlo_abuse)
+        and not filter_legitimate_system
+
+falsepositives:
+    - Custom Windows installations with non-standard system paths
+    - Virtualisation software running modified system binaries
+    - Legitimate pentest tools during authorised red team exercises
+    - Some enterprise software sandboxing legitimate binaries in custom paths
+    - Tune by: validating file hash of flagged binary against known-good hash
+
+level: high
+
+# ── Detection Priority ─────────────────────────────────────────────────────
+#
+# Critical — alert and isolate immediately:
+#   lsass.exe or csrss.exe running from ANY non-System32 path
+#   svchost.exe spawned by anything other than services.exe
+#   RTLO character detected in executable path
+#
+# High — alert and investigate:
+#   Known typosquatting names (svch0st, scvhost, isass)
+#   System binary names running from AppData or Temp paths
+#
+# Medium — investigate during threat hunting:
+#   explorer.exe or rundll32.exe from non-standard paths
+#   System binary names in ProgramData
+#
+# Validation step:
+#   Always check file hash of flagged binary against VirusTotal
+#   and your known-good hash database before escalating.
+#   A legitimate binary in a wrong path = suspicious but may have explanation.
+#   An unknown hash in any path = escalate immediately.
+#
+# MITRE ATT&CK Coverage:
+#   T1036.001 — Invalid Code Signature
+#   T1036.003 — Rename System Utilities
+#   T1036.004 — Masquerade Task or Service
+#   T1036.005 — Match Legitimate Name or Location
+#
+# Companion rules:
+#   rules/process_injection.yml              — injection using masqueraded process
+#   rules/defence_evasion_lolbins.yml        — LOLBin abuse alongside masquerading
+#   rules/lateral_movement_rdp.yml           — post-masquerade lateral movement
