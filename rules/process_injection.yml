@@ -1,0 +1,158 @@
+title: Process Injection via Common Injection Techniques
+id: f6a9b4c3-1d2e-4f5a-b8c7-3e4d5f6a7b8c
+status: experimental
+description: |
+    Detects process injection attempts using common techniques observed
+    in real-world malware and C2 frameworks. Process injection allows
+    adversaries to execute malicious code within the address space of
+    a separate live process, evading process-based defences and
+    potentially elevating privileges.
+
+    Techniques covered:
+      - Classic DLL injection (CreateRemoteThread + LoadLibrary)
+      - Process Hollowing (unmapping legitimate process memory)
+      - Reflective DLL injection (self-loading DLL without LoadLibrary)
+      - APC injection (QueueUserAPC to suspended thread)
+      - Thread Hijacking (SetThreadContext on suspended thread)
+
+    Detection focuses on suspicious API call sequences observable via
+    Windows API monitoring (Sysmon EventID 8 — CreateRemoteThread)
+    and process access patterns (Sysmon EventID 10 — ProcessAccess).
+
+    Commonly observed in: Cobalt Strike (multiple injection modes),
+    Metasploit meterpreter, Empire, Sliver, and commodity RATs
+    including AsyncRAT, NjRAT, and Remcos.
+
+references:
+    - https://attack.mitre.org/techniques/T1055/
+    - https://attack.mitre.org/techniques/T1055/001/
+    - https://attack.mitre.org/techniques/T1055/002/
+    - https://attack.mitre.org/techniques/T1055/004/
+    - https://attack.mitre.org/techniques/T1055/012/
+    - https://github.com/charudatta-padhye/detection-query-library
+author: Charudatta Padhye
+date: 2025-05-05
+modified: 2025-05-05
+tags:
+    - attack.defense_evasion
+    - attack.privilege_escalation
+    - attack.t1055            # Process Injection
+    - attack.t1055.001        # Dynamic-link Library Injection
+    - attack.t1055.002        # Portable Executable Injection
+    - attack.t1055.004        # Asynchronous Procedure Call
+    - attack.t1055.012        # Process Hollowing
+logsource:
+    category: process_access
+    product: windows
+    definition: |
+        Requires Sysmon with the following Event IDs:
+        EventID 8  — CreateRemoteThread detected
+        EventID 10 — ProcessAccess (handle opened to another process)
+        EventID 1  — Process creation (for hollowing detection)
+
+        Sysmon configuration requirements:
+          ProcessAccess: Enable with GrantedAccess filters
+          CreateRemoteThread: Enable for all processes
+          Minimum Sysmon version: 13.0
+
+detection:
+    # Detection 1: CreateRemoteThread into a remote process
+    selection_create_remote_thread:
+        EventID: 8              # Sysmon CreateRemoteThread
+        TargetImage|endswith:
+            - '\explorer.exe'
+            - '\svchost.exe'
+            - '\lsass.exe'
+            - '\csrss.exe'
+            - '\winlogon.exe'
+            - '\spoolsv.exe'
+            - '\notepad.exe'
+            - '\calc.exe'       # Commonly used as injection target in tests
+
+    # Detection 2: Suspicious process access rights
+    # PROCESS_VM_WRITE + PROCESS_VM_OPERATION = classic injection pattern
+    selection_process_access_injection:
+        EventID: 10             # Sysmon ProcessAccess
+        GrantedAccess|contains:
+            - '0x1F0FFF'        # PROCESS_ALL_ACCESS
+            - '0x1F1FFF'        # PROCESS_ALL_ACCESS variant
+            - '0x143A'          # VM read/write + create thread
+            - '0x40'            # PROCESS_DUP_HANDLE (process hollowing)
+            - '0x1410'          # Common Cobalt Strike access mask
+
+    # Detection 3: Process hollowing indicators
+    # Legitimate process spawned then unmapped and replaced
+    selection_process_hollowing:
+        EventID: 1              # Process creation
+        ParentImage|endswith:
+            - '\winword.exe'
+            - '\excel.exe'
+            - '\powerpnt.exe'
+            - '\outlook.exe'
+        Image|endswith:
+            - '\svchost.exe'    # Hollowed svchost — extremely suspicious
+            - '\explorer.exe'
+            - '\notepad.exe'
+            - '\calc.exe'
+        CommandLine|contains:
+            - ' '               # Hollowed processes often have minimal args
+
+    filter_legitimate_processes:
+        # Exclude known legitimate remote thread creators
+        SourceImage|endswith:
+            - '\MsMpEng.exe'    # Windows Defender
+            - '\csrss.exe'      # System process
+            - '\wininit.exe'    # Windows initialisation
+            - '\services.exe'   # Service control manager
+
+    filter_security_software:
+        # Exclude EDR/AV agents — these legitimately inject for monitoring
+        SourceImage|contains:
+            - 'CrowdStrike'
+            - 'SentinelOne'
+            - 'Carbon Black'
+            - 'Cylance'
+            - 'Defender'
+
+    condition: >
+        (selection_create_remote_thread or
+         selection_process_access_injection or
+         selection_process_hollowing)
+        and not filter_legitimate_processes
+        and not filter_security_software
+
+falsepositives:
+    - EDR and AV agents legitimately performing code injection for monitoring
+    - Game anti-cheat software (highly invasive, uses injection techniques)
+    - Legitimate software using CreateRemoteThread for IPC mechanisms
+    - Debugging tools (WinDbg, x64dbg) during development/analysis
+    - Tune by: adding your EDR agent's process name to filter_security_software
+
+level: high
+
+# ── Detection Confidence by Sub-technique ─────────────────────────────────
+#
+# Highest confidence (alert immediately):
+#   CreateRemoteThread into lsass.exe or csrss.exe — almost never legitimate
+#   Office application spawning hollowed svchost.exe
+#   PROCESS_ALL_ACCESS (0x1F0FFF) from non-system, non-EDR process
+#
+# Medium confidence (investigate):
+#   CreateRemoteThread into explorer.exe or notepad.exe
+#   Unusual GrantedAccess masks from user-space processes
+#
+# Stack with for higher confidence:
+#   T1059 (Command execution) before injection = staged attack
+#   T1078 (Valid accounts) + injection = post-credential-theft execution
+#   C2 beaconing after injection from target process = confirmed compromise
+#
+# MITRE ATT&CK Coverage:
+#   T1055.001 — DLL Injection
+#   T1055.002 — PE Injection
+#   T1055.004 — APC Injection
+#   T1055.012 — Process Hollowing
+#
+# Companion rules:
+#   rules/valid_accounts_credential_abuse.yml  — credential theft pre-injection
+#   rules/lateral_movement_rdp.yml             — post-injection lateral movement
+#   rules/c2_beaconing_periodic.yml            — C2 channel post-injection
