@@ -1,0 +1,228 @@
+title: Impair Defences via Security Tool Tampering and Log Clearing
+id: c3d4e5f6-7a8b-4c9d-0e1f-2a3b4c5d6e7f
+status: experimental
+description: |
+    Detects attempts to impair defensive capabilities by disabling,
+    modifying, or tampering with security tools, audit policies,
+    and logging mechanisms. Adversaries impair defences to reduce
+    the likelihood of detection and response during an intrusion.
+
+    Techniques covered:
+      - Windows Defender disabling (via PowerShell, registry, or sc.exe)
+      - Security audit policy modification (auditpol.exe)
+      - Windows Event Log clearing or stopping (wevtutil, net stop)
+      - Firewall rule modification or disabling (netsh)
+      - EDR/AV service tampering (sc stop, taskkill against security processes)
+      - Sysmon uninstallation or configuration tampering
+      - Shadow copy deletion (vssadmin — ransomware pre-cursor)
+      - Windows Security Centre tampering
+
+    Shadow copy deletion is included here because it is functionally
+    a defence impairment — removing backup recovery capability before
+    ransomware deployment. This is observed in nearly every ransomware
+    intrusion in the past 3 years.
+
+    Commonly observed in: Pre-ransomware activity (LockBit, BlackCat,
+    Conti playbook), APT lateral movement preparation, and post-exploit
+    cleanup by commodity malware.
+
+references:
+    - https://attack.mitre.org/techniques/T1562/
+    - https://attack.mitre.org/techniques/T1562/001/
+    - https://attack.mitre.org/techniques/T1562/002/
+    - https://attack.mitre.org/techniques/T1562/006/
+    - https://attack.mitre.org/techniques/T1490/
+    - https://github.com/charudatta-padhye/detection-query-library
+author: Charudatta Padhye
+date: 2025-05-07
+modified: 2025-05-07
+tags:
+    - attack.defense_evasion
+    - attack.t1562            # Impair Defenses
+    - attack.t1562.001        # Disable or Modify Tools
+    - attack.t1562.002        # Disable Windows Event Logging
+    - attack.t1562.004        # Disable or Modify System Firewall
+    - attack.t1562.006        # Indicator Blocking
+    - attack.t1490            # Inhibit System Recovery (shadow copies)
+logsource:
+    category: process_creation
+    product: windows
+    definition: |
+        Requires Sysmon EventID 1 (Process Creation) with command line logging.
+        Additional log sources for full coverage:
+        EventID 4719 — System audit policy changed
+        EventID 1102 — Security audit log cleared
+        EventID 7036 — Service stopped (for EDR/AV service tampering)
+        EventID 104  — System log cleared
+detection:
+    # Detection 1: Windows Defender tampering
+    selection_defender_disable:
+        EventID: 1
+        CommandLine|contains:
+            - 'Set-MpPreference -DisableRealtimeMonitoring'
+            - 'Set-MpPreference -DisableIOAVProtection'
+            - 'Set-MpPreference -DisableBehaviorMonitoring'
+            - 'Add-MpPreference -ExclusionPath'     # Adding exclusions
+            - 'MpCmdRun.exe -RemoveDefinitions'
+        Image|endswith:
+            - '\powershell.exe'
+            - '\pwsh.exe'
+            - '\MpCmdRun.exe'
+
+    # Detection 2: Security audit policy modification
+    selection_auditpol_tamper:
+        EventID: 1
+        Image|endswith: '\auditpol.exe'
+        CommandLine|contains:
+            - '/set'
+            - '/clear'
+            - '/remove'
+            - 'disable'
+
+    # Detection 3: Event log clearing or stopping
+    selection_eventlog_tamper:
+        EventID: 1
+        CommandLine|contains:
+            - 'wevtutil cl'             # Clear log
+            - 'wevtutil clear-log'
+            - 'Clear-EventLog'          # PowerShell
+            - 'Remove-EventLog'
+        Image|endswith:
+            - '\wevtutil.exe'
+            - '\powershell.exe'
+            - '\pwsh.exe'
+
+    # Detection 4: Event log service stopped
+    selection_eventlog_service_stop:
+        EventID: 1
+        Image|endswith: '\net.exe'
+        CommandLine|contains:
+            - 'stop eventlog'
+            - 'stop "windows event log"'
+
+    # Detection 5: Firewall tampering
+    selection_firewall_disable:
+        EventID: 1
+        Image|endswith: '\netsh.exe'
+        CommandLine|contains:
+            - 'firewall set opmode disable'
+            - 'advfirewall set allprofiles state off'
+            - 'firewall add rule'       # Adding allow rules for C2 traffic
+
+    # Detection 6: EDR and AV service tampering
+    selection_security_service_tamper:
+        EventID: 1
+        Image|endswith:
+            - '\sc.exe'
+            - '\net.exe'
+            - '\taskkill.exe'
+        CommandLine|contains:
+            # Common EDR/AV service names
+            - 'CrowdStrike'
+            - 'CSFalcon'
+            - 'SentinelOne'
+            - 'SentinelAgent'
+            - 'MsMpEng'
+            - 'WinDefend'
+            - 'Darktrace'
+            - 'CarbonBlack'
+            - 'cb.exe'
+            - 'Symantec'
+            - 'McAfee'
+            - 'Sophos'
+        CommandLine|contains:
+            - 'stop'
+            - 'delete'
+            - '/IM'             # taskkill process name flag
+            - '/F'              # Force kill
+
+    # Detection 7: Sysmon tampering
+    selection_sysmon_tamper:
+        EventID: 1
+        Image|endswith:
+            - '\sysmon.exe'
+            - '\sysmon64.exe'
+            - '\sc.exe'
+        CommandLine|contains:
+            - '-u'              # Sysmon uninstall
+            - 'stop sysmon'
+            - 'delete sysmon'
+            - 'uninstall'
+
+    # Detection 8: Shadow copy deletion (ransomware pre-cursor)
+    # T1490 — Inhibit System Recovery
+    selection_shadow_copy_deletion:
+        EventID: 1
+        Image|endswith:
+            - '\vssadmin.exe'
+            - '\wmic.exe'
+            - '\powershell.exe'
+            - '\pwsh.exe'
+        CommandLine|contains:
+            - 'delete shadows'
+            - 'shadowcopy delete'
+            - 'Delete Shadows /All'
+            - 'resize shadowstorage'
+            - 'vssadmin.exe Delete'
+            - 'Win32_ShadowCopy'
+
+    filter_legitimate_admin:
+        # Exclude legitimate scheduled maintenance tasks
+        SubjectUserName|endswith: '$'
+        ParentImage|endswith:
+            - '\services.exe'
+            - '\taskeng.exe'
+            - '\svchost.exe'
+
+    condition: >
+        (selection_defender_disable or
+         selection_auditpol_tamper or
+         selection_eventlog_tamper or
+         selection_eventlog_service_stop or
+         selection_firewall_disable or
+         selection_security_service_tamper or
+         selection_sysmon_tamper or
+         selection_shadow_copy_deletion)
+        and not filter_legitimate_admin
+
+falsepositives:
+    - Legitimate IT administrators disabling Defender during software installation
+    - Vulnerability scanners triggering firewall rule modifications
+    - Backup software interacting with shadow copies legitimately
+    - Security team red team exercises
+    - Tune by: adding approved maintenance windows and admin accounts to exclusion
+
+level: critical
+
+# ── Why Critical Severity ──────────────────────────────────────────────────
+#
+# Any confirmed defence impairment in production = active intrusion indicator.
+# There is almost no legitimate reason for a non-admin process to:
+#   - Disable Windows Defender real-time monitoring
+#   - Clear Windows Event Logs
+#   - Stop EDR agent services
+#   - Delete shadow copies
+#
+# Shadow copy deletion in particular warrants immediate host isolation —
+# it is observed in 95%+ of ransomware intrusions as a pre-encryption step.
+# If you see this, assume ransomware is imminent or already executing.
+#
+# Recommended response playbook:
+#   1. Alert fires → immediately pull process tree from EDR
+#   2. Identify parent process and user account
+#   3. Check for lateral movement from same host in last 24 hours
+#   4. If shadow copy deletion confirmed → isolate host immediately
+#   5. Check all hosts for same IOCs (campaign-level response)
+#
+# MITRE ATT&CK Coverage:
+#   T1562.001 — Disable or Modify Tools (Defender, EDR, AV)
+#   T1562.002 — Disable Windows Event Logging
+#   T1562.004 — Disable or Modify System Firewall
+#   T1562.006 — Indicator Blocking (Sysmon tampering)
+#   T1490     — Inhibit System Recovery (shadow copies)
+#
+# Companion rules:
+#   rules/powershell_suspicious_execution.yml  — PowerShell used for disabling
+#   rules/masquerading.yml                     — renamed tools used for tampering
+#   rules/lateral_movement_rdp.yml             — movement after defence removal
+#   rules/c2_beaconing_periodic.yml            — C2 established after impairment
