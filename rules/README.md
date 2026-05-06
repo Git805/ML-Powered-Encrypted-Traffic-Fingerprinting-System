@@ -13,6 +13,8 @@ converted using sigmac for SIEM deployment.
 | [high_entropy_dns.yml](high_entropy_dns.yml) | T1071.004, T1572 | Command & Control | Medium | Zeek dns.log | Experimental |
 | [valid_accounts_credential_abuse.yml](valid_accounts_credential_abuse.yml) | T1078 | Initial Access, Persistence | Medium | Windows Security Events | Experimental |
 | [lateral_movement_rdp.yml](lateral_movement_rdp.yml) | T1021.001 | Lateral Movement | Medium | Windows Security Events | Experimental |
+| [process_injection.yml](process_injection.yml) | T1055 | Defence Evasion, Privilege Escalation | High | Sysmon EventID 8, 10 | Experimental |
+| [masquerading.yml](masquerading.yml) | T1036 | Defence Evasion | High | Sysmon EventID 1 | Experimental |
 
 ## MITRE ATT&CK Coverage
 
@@ -28,6 +30,10 @@ Lateral Movement (TA0008)
 
 Initial Access / Persistence / Defence Evasion
 └── T1078      Valid Accounts                             ← valid_accounts_credential_abuse
+
+Defence Evasion / Privilege Escalation
+├── T1055  Process Injection    ← process_injection
+└── T1036  Masquerading         ← masquerading
 ```
 
 ## Convert to Your SIEM
