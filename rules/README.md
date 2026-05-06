@@ -15,6 +15,8 @@ converted using sigmac for SIEM deployment.
 | [lateral_movement_rdp.yml](lateral_movement_rdp.yml) | T1021.001 | Lateral Movement | Medium | Windows Security Events | Experimental |
 | [process_injection.yml](process_injection.yml) | T1055 | Defence Evasion, Privilege Escalation | High | Sysmon EventID 8, 10 | Experimental |
 | [masquerading.yml](masquerading.yml) | T1036 | Defence Evasion | High | Sysmon EventID 1 | Experimental |
+| [powershell_suspicious_execution.yml](powershell_suspicious_execution.yml) | T1059.001, T1027 | Execution, Defence Evasion | High | Sysmon EventID 1, 4104 | Experimental |
+| [impair_defences.yml](impair_defences.yml) | T1562, T1490 | Defence Evasion | Critical | Sysmon EventID 1, Windows Security | Experimental |
 
 ## MITRE ATT&CK Coverage
 
@@ -34,6 +36,15 @@ Initial Access / Persistence / Defence Evasion
 Defence Evasion / Privilege Escalation
 ├── T1055  Process Injection    ← process_injection
 └── T1036  Masquerading         ← masquerading
+
+Execution (TA0002)
+└── T1059.001  Command and Scripting Interpreter: PowerShell  ← powershell_suspicious_execution
+
+Defence Evasion (TA0005) — continued
+├── T1562      Impair Defenses                                ← impair_defences
+├── T1562.001  Disable or Modify Tools
+├── T1562.002  Disable Windows Event Logging
+└── T1490      Inhibit System Recovery (Shadow Copies)        ← impair_defences
 ```
 
 ## Convert to Your SIEM
