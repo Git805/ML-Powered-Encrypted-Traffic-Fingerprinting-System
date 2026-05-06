@@ -1,0 +1,203 @@
+title: Suspicious PowerShell Execution via Command and Scripting Interpreter
+id: b2c3d4e5-6f7a-4b8c-9d0e-1f2a3b4c5d6e
+status: experimental
+description: |
+    Detects suspicious PowerShell execution patterns associated with
+    malicious use of the Command and Scripting Interpreter. PowerShell
+    is the most commonly abused scripting interpreter in Windows
+    environments due to its deep integration with the OS, access to
+    .NET framework, and ability to execute in-memory without touching disk.
+
+    Techniques covered:
+      - Encoded command execution (-EncodedCommand / -enc)
+      - Download cradles (IEX + WebClient / Invoke-WebRequest)
+      - AMSI bypass attempts (AmsiContext, AmsiScanBuffer patches)
+      - PowerShell without a window (-WindowStyle Hidden / -NonInteractive)
+      - Execution policy bypass (-ExecutionPolicy Bypass / Unrestricted)
+      - Suspicious parent processes spawning PowerShell (Office, browsers)
+      - In-memory execution patterns (Invoke-Expression, IEX, &([...]))
+      - Reflective loading (Invoke-ReflectivePEInjection, PowerSploit)
+
+    Commonly observed in: Cobalt Strike PowerShell launchers, Empire,
+    PowerSploit, Metasploit PSExec payloads, and phishing macro droppers
+    (Emotet, Dridex, QakBot initial access via malicious Office macros).
+
+references:
+    - https://attack.mitre.org/techniques/T1059/001/
+    - https://attack.mitre.org/techniques/T1027/
+    - https://github.com/charudatta-padhye/detection-query-library
+    - https://www.mandiant.com/resources/blog/bring-your-own-land-novel-red-teaming-technique
+author: Charudatta Padhye
+date: 2025-05-07
+modified: 2025-05-07
+tags:
+    - attack.execution
+    - attack.t1059.001        # Command and Scripting Interpreter: PowerShell
+    - attack.t1027            # Obfuscated Files or Information
+    - attack.t1027.010        # Command Obfuscation
+    - attack.t1562.001        # Impair Defenses: Disable or Modify Tools (AMSI)
+    - attack.defense_evasion
+logsource:
+    category: process_creation
+    product: windows
+    definition: |
+        Requires Sysmon EventID 1 (Process Creation) with full command
+        line logging enabled, OR Windows Security EventID 4688 with
+        command line auditing enabled via Group Policy.
+
+        Also benefits from:
+        EventID 4103 — PowerShell Module Logging
+        EventID 4104 — PowerShell Script Block Logging (highest fidelity)
+
+        Enable Script Block Logging via GPO:
+        Computer Config → Admin Templates → Windows Components →
+        Windows PowerShell → Turn on PowerShell Script Block Logging
+detection:
+    selection_encoded_command:
+        EventID: 1
+        Image|endswith:
+            - '\powershell.exe'
+            - '\pwsh.exe'           # PowerShell Core
+        CommandLine|contains:
+            - ' -enc '
+            - ' -EncodedCommand '
+            - ' -ec '               # Shortened alias
+
+    selection_download_cradle:
+        EventID: 1
+        Image|endswith:
+            - '\powershell.exe'
+            - '\pwsh.exe'
+        CommandLine|contains:
+            - 'IEX'
+            - 'Invoke-Expression'
+            - 'DownloadString'
+            - 'DownloadFile'
+            - 'WebClient'
+            - 'Invoke-WebRequest'
+            - 'wget '
+            - 'curl '
+            - 'Net.WebClient'
+
+    selection_amsi_bypass:
+        EventID: 1
+        Image|endswith:
+            - '\powershell.exe'
+            - '\pwsh.exe'
+        CommandLine|contains:
+            - 'AmsiContext'
+            - 'AmsiScanBuffer'
+            - 'amsiInitFailed'
+            - 'AmsiUtils'
+            - '[Ref].Assembly'      # Common AMSI patch technique
+
+    selection_hidden_execution:
+        EventID: 1
+        Image|endswith:
+            - '\powershell.exe'
+            - '\pwsh.exe'
+        CommandLine|contains:
+            - '-WindowStyle H'      # Hidden window
+            - '-W H'                # Shortened
+            - '-NonI'               # NonInteractive
+            - '-noni'
+            - '-ExecutionPolicy Bypass'
+            - '-EP Bypass'
+            - '-exec bypass'
+
+    selection_suspicious_parent:
+        EventID: 1
+        Image|endswith:
+            - '\powershell.exe'
+            - '\pwsh.exe'
+        ParentImage|endswith:
+            - '\winword.exe'        # Office macro dropper
+            - '\excel.exe'
+            - '\powerpnt.exe'
+            - '\outlook.exe'
+            - '\mshta.exe'          # HTA launcher
+            - '\wscript.exe'        # VBScript launcher
+            - '\cscript.exe'
+            - '\chrome.exe'         # Browser-based delivery
+            - '\firefox.exe'
+            - '\msedge.exe'
+
+    selection_reflective_loading:
+        EventID: 1
+        Image|endswith:
+            - '\powershell.exe'
+            - '\pwsh.exe'
+        CommandLine|contains:
+            - 'Invoke-ReflectivePEInjection'
+            - 'Invoke-Shellcode'
+            - 'PowerSploit'
+            - 'PowerView'
+            - 'Invoke-Mimikatz'
+            - 'Get-GPPPassword'
+            - 'Invoke-TokenManipulation'
+
+    filter_legitimate_admin:
+        # Exclude known legitimate PowerShell admin tasks
+        # Add your environment's legitimate PowerShell scripts here
+        CommandLine|contains:
+            - 'WindowsUpdate'
+            - 'PSWindowsUpdate'
+        ParentImage|endswith:
+            - '\services.exe'
+            - '\svchost.exe'
+
+    filter_system_accounts:
+        SubjectUserName|endswith: '$'   # Machine accounts
+
+    condition: >
+        (selection_encoded_command or
+         selection_download_cradle or
+         selection_amsi_bypass or
+         selection_hidden_execution or
+         selection_suspicious_parent or
+         selection_reflective_loading)
+        and not filter_legitimate_admin
+        and not filter_system_accounts
+
+falsepositives:
+    - Legitimate IT administration scripts using encoded commands
+    - Software deployment tools (SCCM, Ansible) using PowerShell remoting
+    - Security tools and EDR agents using PowerShell for telemetry
+    - Developer tooling (VS Code, JetBrains) spawning PowerShell
+    - Tune by: enabling Script Block Logging for full visibility,
+      then whitelist specific known-good script hashes
+
+level: high
+
+# ── Severity by Detection Layer ────────────────────────────────────────────
+#
+# Critical (page on-call):
+#   AMSI bypass attempt — adversary is actively evading AV/EDR
+#   Reflective loading functions (Invoke-Mimikatz, Invoke-Shellcode)
+#   Office app spawning PowerShell with encoded + hidden flags combined
+#
+# High (alert SOC):
+#   Encoded command from any non-admin parent process
+#   Download cradle (IEX + WebClient) from user workstation
+#   PowerShell spawned by browser or mshta
+#
+# Medium (investigate during hunting):
+#   Hidden execution flags alone (may be legitimate admin scripts)
+#   Execution policy bypass alone (common in dev environments)
+#
+# Script Block Logging advantage:
+#   EventID 4104 captures the DECODED script content before execution.
+#   This defeats encoding obfuscation entirely.
+#   Enable it — it is the single highest-value PowerShell detection control.
+#
+# MITRE ATT&CK Coverage:
+#   T1059.001 — PowerShell (primary)
+#   T1027     — Obfuscated Files or Information (encoding)
+#   T1027.010 — Command Obfuscation
+#   T1562.001 — Impair Defenses: AMSI bypass (secondary)
+#
+# Companion rules:
+#   rules/masquerading.yml                    — renamed powershell.exe
+#   rules/process_injection.yml              — post-execution injection
+#   rules/defence_evasion_lolbins.yml        — LOLBin chains with PowerShell
+#   rules/lateral_movement_rdp.yml           — post-execution lateral movement
